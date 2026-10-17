@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Local AI Studio</title>
+  <link rel="stylesheet" href="/src/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>&#9889;</text></svg>">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">&#9889;</span>
+        <div>
+          <div class="brand-name">Local AI Studio</div>
+          <div class="brand-sub" id="conn-status">connecting&hellip;</div>
+        </div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <button class="nav-item active" data-page="dashboard">Dashboard</button>
+        <button class="nav-item" data-page="models">Models</button>
+        <button class="nav-item" data-page="instances">Instances <span class="badge" id="nav-instances">0</span></button>
+        <button class="nav-item" data-page="chat">Chat</button>
+        <button class="nav-item" data-page="playground">API Playground</button>
+        <button class="nav-item" data-page="monitor">Monitor</button>
+        <button class="nav-item" data-page="logs">Logs</button>
+        <button class="nav-item" data-page="settings">Settings</button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="mini-stat"><span>GPU</span><strong id="side-gpu">&ndash;</strong></div>
+        <div class="mini-stat"><span>RAM</span><strong id="side-ram">&ndash;</strong></div>
+        <div class="mini-stat"><span>API</span><strong id="side-api">&ndash;</strong></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- ============ Dashboard ============ -->
+      <section class="page active" id="page-dashboard">
+        <header class="page-head">
+          <h1>Dashboard</h1>
+          <div class="page-actions">
+            <span class="pill" id="dash-status">unknown</span>
+            <button class="btn" id="dash-refresh">Refresh</button>
+          </div>
+        </header>
+
+        <div class="grid stats" id="dash-stats">
+          <div class="card stat"><div class="stat-label">API endpoint</div><div class="stat-value mono" id="stat-api">&ndash;</div></div>
+          <div class="card stat"><div class="stat-label">Loaded instances</div><div class="stat-value" id="stat-instances">0</div></div>
+          <div class="card stat"><div class="stat-label">Active requests</div><div class="stat-value" id="stat-requests">0</div></div>
+          <div class="card stat"><div class="stat-label">Generation speed</div><div class="stat-value" id="stat-tps">&ndash;</div><div class="stat-sub" id="stat-tps-sub"></div></div>
+        </div>
+
+        <div class="grid two">
+          <div class="card">
+            <h2>GPU <span class="pill small" id="gpu-name">&ndash;</span></h2>
+            <div class="meter-row"><span>VRAM used</span>
+              <div class="meter"><div class="meter-fill" id="vram-fill"></div></div>
+              <strong id="vram-text">&ndash;</strong></div>
+            <div class="meter-row"><span>GPU utilization</span>
+              <div class="meter"><div class="meter-fill alt" id="gpu-fill"></div></div>
+              <strong id="gpu-text">&ndash;</strong></div>
+            <p class="hint" id="gpu-hint"></p>
+          </div>
+          <div class="card">
+            <h2>System memory</h2>
+            <div class="meter-row"><span>RAM</span>
+              <div class="meter"><div class="meter-fill" id="ram-fill"></div></div>
+              <strong id="ram-text">&ndash;</strong></div>
+            <div class="meter-row"><span>Commit charge</span>
+              <div class="meter"><div class="meter-fill alt" id="commit-fill"></div></div>
+              <strong id="commit-text">&ndash;</strong></div>
+            <div class="meter-row"><span>Pagefile</span>
+              <div class="meter"><div class="meter-fill warn" id="page-fill"></div></div>
+              <strong id="page-text">&ndash;</strong></div>
+            <p class="hint">Heavy pagefile use means inference is swapping to disk: slow, not free memory.</p>
+          </div>
+        </div>
+
+        <div class="grid two">
+          <div class="card">
+            <h2>Loaded instances</h2>
+            <div id="dash-instances" class="list"><p class="hint">Nothing loaded yet.</p></div>
+          </div>
+          <div class="card">
+            <h2>Recent events</h2>
+            <div id="dash-events" class="list log-list"><p class="hint">No events yet.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ Models ============ -->
+      <section class="page" id="page-models">
+        <header class="page-head">
+          <h1>Models</h1>
+          <div class="page-actions">
+            <input type="search" id="model-search" placeholder="Search models&hellip;" class="input">
+            <select id="model-filter" class="input">
+              <option value="all">All models</option>
+              <option value="loaded">Loaded</option>
+              <option value="supported">Supported</option>
+              <option value="unverified">Unverified</option>
+              <option value="convertible">Needs conversion</option>
+            </select>
+            <button class="btn" id="models-rescan">Rescan</button>
+          </div>
+        </header>
+        <p class="hint" id="models-summary"></p>
+        <div id="models-list" class="list"></div>
+      </section>
+
+      <!-- ============ Instances ============ -->
+      <section class="page" id="page-instances">
+        <header class="page-head">
+          <h1>Loaded instances</h1>
+          <div class="page-actions"><button class="btn" id="instances-refresh">Refresh</button></div>
+        </header>
+        <p class="hint">A model on disk is <em>available</em>; a model here is <em>loaded into memory</em> and serving requests.</p>
+        <div id="instances-list" class="list"></div>
+      </section>
+
+      <!-- ============ Chat ============ -->
+      <section class="page" id="page-chat">
+        <header class="page-head">
+          <h1>Chat playground</h1>
+          <div class="page-actions">
+            <select id="chat-model" class="input"><option value="">No model loaded</option></select>
+            <button class="btn danger" id="chat-clear">Clear</button>
+          </div>
+        </header>
+        <div class="chat-layout">
+          <div class="chat-messages" id="chat-messages">
+            <div class="chat-empty" id="chat-empty">Load a model, then start chatting. Responses stream live and can be stopped.</div>
+          </div>
+          <div class="chat-controls">
+            <label>System prompt
+              <textarea id="chat-system" rows="3" placeholder="You are a helpful assistant."></textarea>
+            </label>
+            <div class="row">
+              <label>Temperature <input type="number" id="chat-temp" value="0.7" step="0.05" min="0" max="2"></label>
+              <label>Top-p <input type="number" id="chat-topp" value="0.95" step="0.01" min="0" max="1"></label>
+            </div>
+            <div class="row">
+              <label>Max tokens <input type="number" id="chat-max" value="512" step="64" min="1"></label>
+              <label>Repeat penalty <input type="number" id="chat-repeat" value="1.1" step="0.05" min="1"></label>
+            </div>
+            <label class="checkbox"><input type="checkbox" id="chat-reasoning"> Show reasoning (thinking) content</label>
+            <div class="chat-send-row">
+              <input type="text" id="chat-input" placeholder="Type a message&hellip; (Enter to send)">
+              <button class="btn primary" id="chat-send">Send</button>
+              <button class="btn danger" id="chat-stop" disabled>Stop</button>
+            </div>
+            <div class="hint" id="chat-meta"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ API Playground ============ -->
+      <section class="page" id="page-playground">
+        <header class="page-head">
+          <h1>API playground</h1>
+          <div class="page-actions">
+            <button class="btn" data-test="health">Health</button>
+            <button class="btn" data-test="models">Models</button>
+            <button class="btn" data-test="chat">Chat</button>
+            <button class="btn" data-test="stream">Streaming</button>
+          </div>
+        </header>
+        <div class="grid two">
+          <div class="card">
+            <h2>Request</h2>
+            <label>Endpoint <input type="text" id="pg-endpoint" value="/v1/chat/completions" class="input"></label>
+            <label>Body (JSON)
+              <textarea id="pg-body" rows="16" spellcheck="false" class="mono">{
+  "model": "",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "stream": false,
+  "temperature": 0.7
+}</textarea>
+            </label>
+            <label class="checkbox"><input type="checkbox" id="pg-stream"> Stream response</label>
+            <button class="btn primary" id="pg-send">Send request</button>
+          </div>
+          <div class="card">
+            <h2>Response <span class="pill small" id="pg-status">&ndash;</span> <span class="hint" id="pg-latency"></span></h2>
+            <pre id="pg-response" class="code-block">Run a test to see the response.</pre>
+            <h2>Copyable example</h2>
+            <pre id="pg-example" class="code-block"></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ Monitor ============ -->
+      <section class="page" id="page-monitor">
+        <header class="page-head">
+          <h1>Resource monitor</h1>
+          <div class="page-actions">
+            <div class="segmented" id="monitor-range">
+              <button class="active" data-seconds="60">1 min</button>
+              <button data-seconds="300">5 min</button>
+              <button data-seconds="1800">30 min</button>
+            </div>
+          </div>
+        </header>
+        <div class="grid two">
+          <div class="card"><h2>VRAM (MB)</h2><canvas id="chart-vram" height="140"></canvas><div class="hint" id="chart-vram-info"></div></div>
+          <div class="card"><h2>GPU utilization (%)</h2><canvas id="chart-gpu" height="140"></canvas><div class="hint" id="chart-gpu-info"></div></div>
+          <div class="card"><h2>RAM &amp; commit (GB)</h2><canvas id="chart-mem" height="140"></canvas><div class="hint" id="chart-mem-info"></div></div>
+          <div class="card"><h2>CPU (%)</h2><canvas id="chart-cpu" height="140"></canvas><div class="hint" id="chart-cpu-info"></div></div>
+        </div>
+      </section>
+
+      <!-- ============ Logs ============ -->
+      <section class="page" id="page-logs">
+        <header class="page-head">
+          <h1>Logs &amp; events</h1>
+          <div class="page-actions">
+            <input type="search" id="log-search" placeholder="Search&hellip;" class="input">
+            <select id="log-level" class="input">
+              <option value="">All levels</option><option>info</option><option>warning</option><option>error</option>
+            </select>
+            <label class="checkbox"><input type="checkbox" id="log-live" checked> Live</label>
+            <button class="btn" id="log-copy">Copy</button>
+            <button class="btn" id="log-export">Export</button>
+          </div>
+        </header>
+        <div class="card"><div id="log-list" class="log-list tall"></div></div>
+      </section>
+
+      <!-- ============ Settings ============ -->
+      <section class="page" id="page-settings">
+        <header class="page-head">
+          <h1>Settings</h1>
+          <div class="page-actions">
+            <button class="btn" id="settings-reset">Restore defaults</button>
+            <button class="btn primary" id="settings-save">Save settings</button>
+          </div>
+        </header>
+        <div id="settings-form"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Load dialog -->
+  <dialog id="load-dialog">
+    <form method="dialog" class="dialog-body">
+      <h2 id="load-title">Load model</h2>
+      <div id="load-estimate" class="estimate"></div>
+      <div class="row">
+        <label>GPU mode
+          <select id="load-gpu-mode">
+            <option value="auto">Automatic (fit to free VRAM)</option>
+            <option value="max">Maximum GPU offload</option>
+            <option value="manual">Manual layers</option>
+            <option value="cpu">CPU only</option>
+          </select>
+        </label>
+        <label>GPU layers <input type="number" id="load-ngl" value="99" min="0" max="999"></label>
+      </div>
+      <div class="row">
+        <label>Context length <input type="number" id="load-ctx" value="8192" min="512" step="512"></label>
+        <label>Profile
+          <select id="load-profile">
+            <option value="manual">Manual</option><option value="max-gpu">Maximum GPU</option>
+            <option value="balanced">Balanced</option><option value="low-vram">Low VRAM</option>
+            <option value="max-context">Maximum context</option><option value="cpu">CPU only</option>
+          </select>
+        </label>
+      </div>
+      <label class="checkbox"><input type="checkbox" id="load-mmproj" checked> Load vision projector (mmproj) if present</label>
+      <label class="checkbox"><input type="checkbox" id="load-force"> Force load even if the memory plan looks risky</label>
+      <div class="hint" id="load-progress"></div>
+      <div class="dialog-actions">
+        <button class="btn" value="cancel" id="load-cancel">Cancel</button>
+        <button class="btn primary" id="load-start" value="default">Load</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast-host"></div>
+
+  <script type="module" src="/src/app.js"></script>
+</body>
+</html>

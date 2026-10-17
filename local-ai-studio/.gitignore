@@ -1,0 +1,33 @@
+# Virtual environment
+.venv/
+venv/
+
+# Downloaded / built engine binaries (fetched by setup.ps1)
+engine/
+*.zip
+
+# Runtime state and user data (settings, instance history, logs)
+data/
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Node (frontend tests only; no build step)
+node_modules/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
