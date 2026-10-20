@@ -10,7 +10,6 @@ on:
 # The suite is Windows-only: the resource monitor talks to the Windows PDH
 # performance counters through ctypes, and the process manager uses the
 # Windows console API. It cannot run anywhere else.
-runs-on: windows-latest
 
 permissions:
   contents: read
@@ -49,4 +48,6 @@ jobs:
 
       - name: Run the frontend unit tests
         working-directory: local-ai-studio
+        # PowerShell expands the wildcard for native commands, so this is
+        # the same command the README documents.
         run: node --test frontend/test/*.test.mjs
