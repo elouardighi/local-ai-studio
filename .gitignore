@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Virtual environments
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Build output and binaries
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+*.lib
+build/
+out/
+dist/
+
+# Archives
+*.zip
+*.7z
+*.tar.gz
+
+# Runtime state and user data
+data/
+logs/
+*.log
+*.pid
+
+# The llama.cpp engine, fetched by scripts/setup.ps1
+local-ai-studio/engine/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.bin
+Thumbs.db
+desktop.ini

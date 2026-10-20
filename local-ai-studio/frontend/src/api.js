@@ -29,7 +29,22 @@ export const api = {
   get: (path) => request(path),
   post: (path, body) => request(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
   put: (path, body) => request(path, { method: "PUT", body: JSON.stringify(body) }),
+  del: (path, body) => request(path, { method: "DELETE", body: body ? JSON.stringify(body) : undefined }),
+  // Some HTTP stacks drop the body of a DELETE, so the parameters travel
+  // in the query string as well.
+  delWithQuery: (path, params) => request(`${path}${query(params)}`, { method: "DELETE" }),
 };
+
+/** Build a query string, skipping empty values. */
+export function query(params) {
+  const parts = [];
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value === null || value === undefined || value === "" ||
+        value === "all" || value === false) continue;
+    parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+  }
+  return parts.length ? `?${parts.join("&")}` : "";
+}
 
 // ---- OpenAI-compatible gateway (used by chat + playground) -----------------
 

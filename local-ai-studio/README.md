@@ -91,14 +91,61 @@ nothing else.
 ### From the dashboard
 
 1. Open **http://127.0.0.1:1234**.
-2. Go to **Models**. Your GGUF files appear with size, quantization,
-   architecture and a compatibility verdict.
+2. Go to **Model library**. Your GGUF files appear with size, quantization,
+   architecture and a compatibility verdict. Search them by name, size,
+   quantization or architecture, and filter by whether the file is complete.
 3. Pick one and press **Load**. The memory planner decides how many layers fit
    in VRAM before anything starts, so a model that can't fit is refused with a
-   reason instead of hanging or thrashing your pagefile.
+   reason instead of hanging or thrashing your pagefile. The load dialog
+   also runs a full preflight check — file completeness, architecture,
+   quantization, context and the memory plan — so you see the problems
+   before the engine does.
 4. Talk to it from **Chat**, poke the raw API from **Playground**, watch VRAM
    and RAM on **Monitor**, and read engine output on **Logs**.
 5. **Unload** frees the VRAM immediately.
+
+### Finding and importing models
+
+The **Model library** page searches the folders you have registered. A model
+that exists in two places is flagged as a duplicate (the same bytes, so one
+copy can go); the same model in a different quantization is flagged as a
+variant (neither copy should go). A file whose tensor data stops short is
+reported as incomplete, with the number of bytes missing.
+
+**Import folder** adds a folder to the library. There is a folder picker, or
+you can type a path. Nothing inside an imported folder is moved, renamed or
+deleted — the library only ever reads.
+
+### Deleting a model
+
+Every model card has a **Delete** button. It shows you exactly which files
+would be removed and how much space that frees, and a vision projector is
+only deleted when you tick the box for it.
+
+Deleted files go to the **Windows Recycle Bin**, so a mistake is one click
+to undo. (Windows erases anything too big for the bin for good — when that
+would happen, the dialog says so *before* you press Delete.) A loaded model
+has to be unloaded first.
+
+This is the only operation in the project that writes to a model directory,
+and it only ever touches the file of a model the library already knows
+about.
+
+### Downloading a model (optional, off by default)
+
+**Download** opens the Hugging Face Hub. You can search it and look at
+what's in any repository straight away - browsing is read-only, and so is
+planning a download, so you always see the size, the destination and the
+hash before deciding anything. Fetching a file is a separate thing: it
+stays switched off until you press **Allow downloads** in the dialog (or
+turn on *Allow downloads from Hugging Face* in Settings), and even then
+nothing is fetched until you press **Download** to approve that specific
+file.
+
+Transfers resume if they are interrupted, are verified against the hash the
+Hub published, and a file that does not match is discarded rather than
+installed. A downloaded model is a file like any other: it is never loaded
+or run without you asking for it.
 
 ### From any OpenAI-compatible client
 
@@ -120,8 +167,43 @@ Python examples, including streaming.
 
 ### From OpenCode
 
-Add the models as a custom provider so you can pick any of them in OpenCode's
-`/models` menu. In `opencode.jsonc`:
+OpenCode does **not** ask an OpenAI-compatible server which models it has.
+For a custom provider it reads the model list straight out of its own
+config file. Local AI Studio keeps that file in step for you:
+
+- **a model you download is added to it** — automatically, as soon as the
+  download finishes;
+- **a model you delete is taken out of it** — so you are never offered a
+  model that is not there.
+
+The limits it writes are **honest ones**. A model advertises a context
+length — 150k, 262k — that says something about the architecture, not about
+the card it is going on. The server is asked what actually fits in the free
+VRAM and that is written instead, so OpenCode does not build a prompt the
+engine will only reject:
+
+```jsonc
+"py007_tinyllama-1.1b-chat-v0.3": {
+  "name": "py007_tinyllama-1.1b-chat-v0.3",
+  "limit": { "context": 2048, "output": 1024 }
+}
+```
+
+The config is edited as text, so your comments, your formatting and every
+other provider are left exactly as they were, and a backup is written each
+time. The **OpenCode** bar on the Library page shows whether the two are in
+step, and *Sync now* puts them back together. It can be switched off in
+Settings, and the file it edits can be pointed somewhere else.
+
+You can also do it by hand:
+
+```powershell
+.\scripts\sync-opencode.ps1            # add whatever is missing
+.\scripts\sync-opencode.ps1 -DryRun    # show what would change
+.\scripts\sync-opencode.ps1 -Force     # also rewrite the context limits
+```
+
+If you prefer to write the provider by hand, this is all it takes:
 
 ```jsonc
 {
@@ -131,8 +213,7 @@ Add the models as a custom provider so you can pick any of them in OpenCode's
       "npm": "@ai-sdk/openai-compatible",
       "options": { "baseURL": "http://127.0.0.1:1234/v1" },
       "models": {
-        "Bonsai-27B": { "name": "Bonsai 27B", "limit": { "context": 8192, "output": 4096 } }
-        // add the rest of your models the same way
+        "Bonsai-27B": { "name": "Bonsai 27B", "limit": { "context": 43008, "output": 8192 } }
       }
     }
   }
@@ -158,15 +239,15 @@ companion `mmproj` file, and how quantization affects memory.
 ```
 local-ai-studio\
 ├─ backend\app\
-│  ├─ api\           FastAPI routers: /api/* management, /v1/* OpenAI-compatible
-│  ├─ services\      scanner, instance manager, memory planner, monitor, event bus
+│  ├─ api\           FastAPI routers: /api/* management, /api/library/*, /v1/* OpenAI-compatible
+│  ├─ services\      scanner, library, instance manager, memory planner, monitor, event bus
 │  ├─ config.py      settings model + persistence
 │  └─ main.py        app factory, lifespan, middleware
 ├─ frontend\src\     vanilla-JS dashboard (no build step)
 ├─ engine\llama.cpp\ llama-server.exe (downloaded by setup.ps1)
 ├─ scripts\          setup.ps1 · start.ps1 · stop.ps1 · diagnose.ps1 · build-vulkan.ps1
 ├─ tests\            pytest suite (backend) + Node unit tests (frontend)
-└─ data\             settings.json · instances.json (created at runtime)
+└─ data\             settings.json · instances.json · library.json (created at runtime)
 ```
 
 ---

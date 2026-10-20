@@ -55,7 +55,14 @@ def _read_value(fh, vtype: int) -> Any:
                     values.append(s)
             return {"count": count, "sample": values}
         if atype == 9:  # array of arrays
-            return [_read_value(fh, atype) for _ in range(min(count, 64))]
+            # Every element must be consumed, not just the first few, or the
+            # next key would be read from the wrong offset.
+            values = []
+            for i in range(count):
+                value = _read_value(fh, atype)
+                if i < 8:
+                    values.append(value)
+            return {"count": count, "sample": values}
         fmt = _VT.get(atype)
         if fmt is None:
             raise ValueError(f"unsupported array element type {atype}")
@@ -106,6 +113,175 @@ def read_gguf_metadata(path: Path, max_keys: int = 400) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - scanner must survive bad files
         out["error"] = f"{type(exc).__name__}: {exc}"
     return out
+
+
+# ---------------------------------------------------------------------------
+# Tensor layout: how big should this file be?
+# ---------------------------------------------------------------------------
+#
+# A truncated download still has a perfectly valid GGUF header, so the header
+# alone cannot tell a complete file from a half-finished one. The tensor
+# directory does: every tensor records the offset of its data, so the end of
+# the file can be derived from the offsets alone.
+#
+# Type sizes are *derived* from the file (the distance between two consecutive
+# tensors) rather than trusted from a hard-coded table, so a quant type this
+# code has never heard of still yields a correct answer. A hard-coded table is
+# only consulted for a type that appears exactly once, and even then it is
+# cross-checked against the derived sizes.
+
+# Tensor type sizes are deliberately NOT hard-coded here: the byte size of a
+# quantized tensor depends on its dimensions, so a table of "bytes per block"
+# cannot answer "how long is this file". The size is derived from the tensor
+# directory instead - see read_tensor_layout().
+
+DEFAULT_ALIGNMENT = 32
+
+
+def _skip_string(fh) -> None:
+    (length,) = struct.unpack("<Q", fh.read(8))
+    if length > 100_000_000:
+        raise ValueError(f"implausible string length {length}")
+    fh.seek(length, 1)
+
+
+def _skip_value(fh, vtype: int) -> None:
+    """Advance past a metadata value without decoding it.
+
+    Decoding a 248 000-entry vocabulary is slow and pointless when all we
+    want is the file offset, so strings are seeked over rather than read.
+    """
+    if vtype == 9:  # array
+        (atype,) = struct.unpack("<I", fh.read(4))
+        (count,) = struct.unpack("<Q", fh.read(8))
+        if count > 100_000_000:
+            raise ValueError(f"implausible array count {count}")
+        if atype == 8:  # array of strings
+            for _ in range(count):
+                _skip_string(fh)
+            return
+        if atype == 9:  # array of arrays
+            for _ in range(count):
+                _skip_value(fh, atype)
+            return
+        fmt = _VT.get(atype)
+        if fmt is None:
+            raise ValueError(f"unsupported array element type {atype}")
+        fh.seek(struct.calcsize("<" + fmt) * count, 1)
+        return
+    if vtype == 8:
+        _skip_string(fh)
+        return
+    fmt = _VT.get(vtype)
+    if fmt is None:
+        raise ValueError(f"unsupported value type {vtype}")
+    fh.seek(struct.calcsize("<" + fmt), 1)
+
+
+def read_tensor_layout(path: Path) -> dict[str, Any]:
+    """Derive the expected end-of-file offset from the tensor directory.
+
+    Returns a dict with:
+
+    ``min_end``
+        A mathematically safe lower bound: where the *last* tensor starts.
+        A file shorter than this is definitely truncated.
+    ``exact_end``
+        Where the file should end, when the size of the final tensor could be
+        established. ``None`` when it could not be.
+    ``derived_types``
+        Tensor types whose byte size was learned from the file itself.
+
+    How the size of a tensor is found
+    --------------------------------
+    The directory stores offsets, not sizes, but consecutive offsets give the
+    exact size of every tensor except the last one. The last tensor's size is
+    recovered by scaling a sibling of the same type: a quantized tensor
+    occupies ``type_size * (ne0/block) * ne1 * ne2`` bytes, so for two tensors
+    of one type the byte count is proportional to the product of their
+    dimensions. That keeps the answer exact for quant types this code has
+    never heard of, without a hard-coded table of sizes.
+
+    Never raises: a malformed file returns an ``error`` key.
+    """
+    out: dict[str, Any] = {"min_end": None, "exact_end": None,
+                           "derived_types": [], "error": None}
+    try:
+        with path.open("rb") as fh:
+            header = fh.read(8)
+            if len(header) < 8:
+                out["error"] = "file too small to be GGUF"
+                return out
+            magic, version = struct.unpack("<II", header)
+            if magic != GGUF_MAGIC:
+                out["error"] = f"not a GGUF file (magic 0x{magic:08x})"
+                return out
+            (tensor_count,) = struct.unpack("<Q", fh.read(8))
+            (kv_count,) = struct.unpack("<Q", fh.read(8))
+            out["version"] = version
+
+            # Skip the metadata section - it must be consumed in full or the
+            # tensor directory would be read from the wrong offset.
+            for _ in range(kv_count):
+                _skip_string(fh)
+                (vtype,) = struct.unpack("<I", fh.read(4))
+                _skip_value(fh, vtype)
+
+            # Tensor directory: name, n_dims, dims (u64 each), type, offset.
+            tensors: list[tuple[int, int, int]] = []  # (offset, type, elems)
+            for _ in range(tensor_count):
+                _skip_string(fh)
+                (n_dims,) = struct.unpack("<I", fh.read(4))
+                elems = 1
+                for _d in range(n_dims):
+                    (dim,) = struct.unpack("<Q", fh.read(8))
+                    elems *= dim
+                (ttype,) = struct.unpack("<I", fh.read(4))
+                (toffset,) = struct.unpack("<Q", fh.read(8))
+                tensors.append((toffset, ttype, elems))
+
+            if not tensors:
+                out["error"] = "no tensors in file"
+                return out
+
+            tensors.sort(key=lambda t: t[0])
+            max_offset = tensors[-1][0]
+            data_start = (fh.tell() + DEFAULT_ALIGNMENT - 1) \
+                & ~(DEFAULT_ALIGNMENT - 1)
+            out["tensor_count"] = tensor_count
+            out["data_start"] = data_start
+            out["min_end"] = data_start + max_offset
+
+            # Exact size of every tensor except the last one.
+            sizes: dict[int, int] = {}
+            for i in range(len(tensors) - 1):
+                gap = tensors[i + 1][0] - tensors[i][0]
+                if gap > 0:
+                    sizes[i] = gap
+            out["derived_types"] = sorted({t[1] for t in tensors})
+
+            # The last tensor: scale a sibling of the same type.
+            last = len(tensors) - 1
+            lo, lt, ln = tensors[last]
+            for j in range(last - 1, -1, -1):
+                if tensors[j][1] != lt or j not in sizes:
+                    continue
+                ref_size = sizes[j]
+                ref_elems = tensors[j][2]
+                if ref_size <= 0 or ref_elems <= 0 or ln <= 0:
+                    break
+                numerator = ref_size * ln
+                if numerator % ref_elems:
+                    break            # not a whole number of bytes - do not guess
+                candidate = numerator // ref_elems
+                if candidate > 0:
+                    out["exact_end"] = data_start + lo + candidate
+                    out["last_size_source"] = "scaled from sibling tensor"
+                break
+            return out
+    except Exception as exc:  # noqa: BLE001 - a bad file must not break a scan
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
 
 
 def summarize(result: dict[str, Any]) -> dict[str, Any]:

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.services.process_manager import ProcessManager, find_free_port
+from tests.conftest import port_range
 
 
 def test_find_free_port_skips_occupied():
@@ -22,8 +23,9 @@ def test_find_free_port_skips_occupied():
 
 
 def test_find_free_port_honours_occupied_set():
-    port = find_free_port(19000, 19010, occupied=set(range(19000, 19006)))
-    assert port >= 19006
+    start, end = port_range(19000, 20)
+    port = find_free_port(start, end, occupied=set(range(start, start + 6)))
+    assert port >= start + 6
 
 
 def test_find_free_port_raises_when_exhausted():
@@ -39,7 +41,7 @@ def test_missing_executable_is_rejected(tmp_path: Path):
     async def run():
         pm = ProcessManager()
         with pytest.raises(FileNotFoundError):
-            await pm.start("i1", str(tmp_path / "nope.exe"), [], 19100,
+            await pm.start("i1", str(tmp_path / "nope.exe"), [], port_range(19100)[0],
                            "model.gguf")
 
     asyncio.run(run())
@@ -50,8 +52,8 @@ def test_missing_model_is_rejected(tmp_path: Path, fake_engine_path: Path):
         pm = ProcessManager()
         with pytest.raises(FileNotFoundError):
             await pm.start("i1", sys.executable,
-                           [str(fake_engine_path), "--port", "19101"],
-                           19101, str(tmp_path / "missing.gguf"))
+                           [str(fake_engine_path), "--port", str(port_range(19100)[0] + 1)],
+                           port_range(19100)[0] + 1, str(tmp_path / "missing.gguf"))
 
     asyncio.run(run())
 
@@ -62,7 +64,7 @@ def test_start_becomes_ready_and_stops_cleanly(tmp_path: Path,
         pm = ProcessManager()
         model = tmp_path / "m.gguf"
         model.write_bytes(b"x")
-        port = find_free_port(19110, 19199)
+        port = find_free_port(*port_range(19110))
         ep = await pm.start(
             "i1", sys.executable,
             [str(fake_engine_path), "--port", str(port)],
@@ -85,7 +87,7 @@ def test_slow_engine_is_waited_for(tmp_path: Path, fake_engine_path: Path):
         pm = ProcessManager()
         model = tmp_path / "m.gguf"
         model.write_bytes(b"x")
-        port = find_free_port(19200, 19299)
+        port = find_free_port(*port_range(19200))
         ep = await pm.start(
             "i1", sys.executable,
             [str(fake_engine_path), "--port", str(port),
@@ -103,7 +105,7 @@ def test_engine_output_is_captured(tmp_path: Path, fake_engine_path: Path):
         pm = ProcessManager()
         model = tmp_path / "m.gguf"
         model.write_bytes(b"x")
-        port = find_free_port(19300, 19399)
+        port = find_free_port(*port_range(19300))
         ep = await pm.start(
             "i1", sys.executable,
             [str(fake_engine_path), "--port", str(port)],
@@ -122,7 +124,7 @@ def test_two_instances_never_share_a_port(tmp_path: Path,
         model.write_bytes(b"x")
         used = set()
         for name in ("a", "b"):
-            port = find_free_port(19400, 19499, occupied=used)
+            port = find_free_port(*port_range(19400), occupied=used)
             used.add(port)
             ep = await pm.start(
                 name, sys.executable,

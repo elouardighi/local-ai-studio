@@ -1,0 +1,52 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# The suite is Windows-only: the resource monitor talks to the Windows PDH
+# performance counters through ctypes, and the process manager uses the
+# Windows console API. It cannot run anywhere else.
+runs-on: windows-latest
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (pytest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r local-ai-studio/requirements.txt
+
+      - name: Run the test suite
+        # The tests never touch a GPU, a network or a real model: the
+        # engine is faked, so this is fast and safe to run anywhere.
+        working-directory: local-ai-studio
+        run: python -m pytest tests -q
+
+  frontend:
+    name: frontend (node --test)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run the frontend unit tests
+        working-directory: local-ai-studio
+        run: node --test frontend/test/*.test.mjs

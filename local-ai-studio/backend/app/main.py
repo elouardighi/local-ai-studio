@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .api import library as library_api
 from .api import models as models_api
 from .api import openai_compat, system as system_api
 from .config import FRONTEND_DIR, SettingsStore, ensure_dirs
@@ -43,7 +44,7 @@ def create_app(settings_store: SettingsStore | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Local AI Studio",
-        version="0.1.0",
+        version="0.2.0",
         description="Local model server with an OpenAI-compatible API",
         lifespan=lifespan,
     )
@@ -84,6 +85,7 @@ def create_app(settings_store: SettingsStore | None = None) -> FastAPI:
     # gateway last: its catch-all must never shadow /api or the dashboard.
     app.include_router(models_api.router)
     app.include_router(system_api.router)
+    app.include_router(library_api.router)
 
     # -- frontend -----------------------------------------------------------
     if FRONTEND_DIR.is_dir():

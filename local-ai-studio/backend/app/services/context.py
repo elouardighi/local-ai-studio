@@ -5,10 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from ..config import ENGINE_DIR, SettingsStore
+from .download_manager import DownloadManager
 from .event_bus import EventBus
+from .hf_client import HuggingFaceClient
 from .instance_manager import InstanceManager
 from .log_store import LogStore
 from .memory_planner import get_system_memory
+from .model_library import ModelLibrary
 from .model_scanner import ModelScanner
 from .process_manager import ProcessManager
 from .request_tracker import RequestTracker
@@ -39,6 +42,7 @@ class AppContext:
         self.scanner = ModelScanner(
             get_dirs=lambda: self.settings_store.settings.model_dirs,
             log=self.log,
+            check_integrity=lambda: self.settings_store.settings.integrity_check,
         )
         self.instances = InstanceManager(
             scanner=self.scanner, processes=self.processes,
@@ -55,6 +59,42 @@ class AppContext:
         )
         # Give the instance manager access to live GPU readings.
         self.instances.monitor = self.monitor  # type: ignore[attr-defined]
+
+        # The library owns the folder list and the enriched view of the
+        # models. It writes folder changes back through the settings store so
+        # the scanner, the dashboard and the settings page never disagree.
+        self.library = ModelLibrary(
+            scanner=self.scanner, log=self.log, events=self.events,
+            get_settings=lambda: self.settings_store.settings,
+            update_settings=self.settings_store.update,
+            state_file=Path(self.settings_store.settings.converted_dir).parent
+            / "library.json",
+            get_sample=lambda: self.monitor.last_sample(),
+            get_instances=lambda: self.instances.list(),
+        )
+        # The Hub client and the download manager. Downloads are off unless
+        # the user turns them on, and every transfer still needs an
+        # individual approval.
+        self.hf = HuggingFaceClient(
+            base_url=self.settings_store.settings.hf_api_base,
+            timeout=float(self.settings_store.settings.download_timeout_seconds),
+        )
+        self.downloads = DownloadManager(
+            log=self.log, events=self.events,
+            get_settings=lambda: self.settings_store.settings,
+            client=self.hf,
+            state_file=Path(self.settings_store.settings.converted_dir).parent
+            / "downloads.json",
+            on_complete=self._on_download_complete,
+        )
+
+    def _on_download_complete(self, folder: Path) -> None:
+        """A finished download joins the library so it can be loaded."""
+        try:
+            self.library.add_folder(str(folder))
+        except ValueError as exc:
+            self.log.warning("downloads",
+                             f"could not add {folder} to the library: {exc}")
 
     # -- engine exit handling ----------------------------------------------
 
@@ -84,8 +124,12 @@ class AppContext:
     async def startup(self) -> None:
         self.log.info("app", "starting Local AI Studio backend")
         self.instances.load_history()
+        # Folders that were imported earlier are put back into the scanned
+        # list, in case the settings were edited without them.
+        self.library.ensure_imported_folders()
         self.monitor.probe_gpu_via_engine(ENGINE_DIR)
         self.scanner.scan()
+        self.library._rebuild_groups()  # noqa: SLF001 - same package
         self.monitor.start(instances_ref=self.instances.list)
         self.log.info("app", f"ready: {len(self.scanner.list())} models found")
 

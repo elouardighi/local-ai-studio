@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import gguf
+from . import integrity
 from .supported_archs import ENGINE_TAG, classify_arch
 
 # Directories never worth walking into.
@@ -61,7 +62,8 @@ def _is_split_shard(name: str) -> bool:
     return "-of-" in name.lower() and "-0000" in name.lower()
 
 
-def scan_directory(root: Path) -> list[dict[str, Any]]:
+def scan_directory(root: Path, check_integrity: bool = True
+                   ) -> list[dict[str, Any]]:
     """Scan one root directory and return model records."""
     records: list[dict[str, Any]] = []
     if not root.is_dir():
@@ -113,11 +115,13 @@ def scan_directory(root: Path) -> list[dict[str, Any]]:
             parts = sorted(parts)
             # The GGUF header lives in the first shard; the rest add size.
             records.append(_build_gguf_record(
-                parts[0], directory, projectors, extra_files=parts[1:]))
+                parts[0], directory, projectors, extra_files=parts[1:],
+                check_integrity=check_integrity))
 
         for main_file in standalone:
             records.append(_build_gguf_record(
-                main_file, directory, projectors))
+                main_file, directory, projectors,
+                check_integrity=check_integrity))
 
     # --- Hugging Face / Safetensors directories ---------------------------
     for directory, info in sorted(hf_dirs.items()):
@@ -150,6 +154,16 @@ def scan_directory(root: Path) -> list[dict[str, Any]]:
                 "supported_by_engine": False,
             },
             "memory_estimate_mb": None,
+            "integrity": {
+                "status": integrity.STATUS_UNVERIFIED,
+                "reason": ("safetensors weights are not GGUF; completeness "
+                           "can only be checked after a conversion"),
+                "size_bytes": total,
+                "expected_min_bytes": None,
+                "expected_bytes": None,
+                "signature": None,
+                "part_files": [],
+            },
             "files": [{"path": str(w), "size_bytes": _safe_size(w)} for w in weights],
             "has_chat_template": "<|im_start|>" in str(cfg) or "chat_template" in str(cfg),
         })
@@ -176,7 +190,8 @@ def _hf_capabilities(cfg: dict[str, Any]) -> dict[str, Any]:
 
 def _build_gguf_record(main_file: Path, directory: Path,
                        projectors: list[Path],
-                       extra_files: list[Path] | None = None) -> dict[str, Any]:
+                       extra_files: list[Path] | None = None,
+                       check_integrity: bool = True) -> dict[str, Any]:
     """Build a model record from a main GGUF file and its siblings."""
     probe = gguf.read_gguf_metadata(main_file)
     summary = gguf.summarize(probe) if "metadata" in probe else {}
@@ -229,6 +244,15 @@ def _build_gguf_record(main_file: Path, directory: Path,
         files.append({"path": mmproj_path,
                       "size_bytes": _safe_size(Path(mmproj_path))})
 
+    # Is the file actually complete, and is it a copy of something we already
+    # have? Both questions are answered from the file, never guessed.
+    if check_integrity:
+        report = integrity.check_integrity(main_file, probe)
+    else:
+        report = integrity.IntegrityReport(
+            status=integrity.STATUS_UNVERIFIED,
+            reason="integrity checking is turned off in Settings")
+
     return {
         "id": model_id(main_file),
         "name": summary.get("name") or main_file.stem,
@@ -262,6 +286,7 @@ def _build_gguf_record(main_file: Path, directory: Path,
             "reason": reason,
             "supported_by_engine": facts["supported_by_engine"],
         },
+        "integrity": report.to_dict(),
         "memory_estimate_mb": None,  # filled in by the memory planner
         "files": files,
     }
@@ -278,27 +303,58 @@ def _token_overlap(a: str, b: str) -> float:
 class ModelScanner:
     """Scans configured roots and caches results until ``rescan()``."""
 
-    def __init__(self, get_dirs, log=None) -> None:
+    def __init__(self, get_dirs, log=None, check_integrity=None) -> None:
         self._get_dirs = get_dirs
         self._log = log
+        # A callable returning True/False, so the setting can be changed
+        # without rebuilding the scanner. Integrity checking reads each
+        # file's tensor directory, which is worth being able to switch off.
+        self._check_integrity = check_integrity or (lambda: True)
         self._models: dict[str, dict[str, Any]] = {}
         self._last_scan: float | None = None
         self._errors: list[str] = []
+        # The folder list the cache was built from. When it changes the
+        # cache is stale and must not be trusted.
+        self._signature: tuple[str, ...] = ()
 
-    def scan(self) -> list[dict[str, Any]]:
+    def _integrity_enabled(self) -> bool:
+        try:
+            return bool(self._check_integrity())
+        except Exception:  # noqa: BLE001 - never break a scan over a setting
+            return True
+
+    def _ensure_current(self) -> None:
+        """Rescan when the watched folders have changed since the last scan.
+
+        The cache used to survive a change to the folder list, so a model
+        could still be listed after its folder was removed, and then vanish
+        at the next scan - leaving a page holding an id the server no longer
+        knows. The cache now follows the folder list.
+        """
+        try:
+            dirs = self._get_dirs()
+        except Exception:  # noqa: BLE001 - never break a lookup over a setting
+            return
+        signature = tuple(str(Path(d)) for d in dirs)
+        if signature != self._signature:
+            self.scan(dirs)
+
+    def scan(self, dirs: list[str] | None = None) -> list[dict[str, Any]]:
         import time
         started = time.time()
-        dirs = self._get_dirs()
+        dirs = list(self._get_dirs()) if dirs is None else list(dirs)
         found: dict[str, dict[str, Any]] = {}
         errors: list[str] = []
+        check = self._integrity_enabled()
         for d in dirs:
             root = Path(os.path.expandvars(d)).expanduser()
-            for result in scan_directory(root):
+            for result in scan_directory(root, check_integrity=check):
                 if "error" in result:
                     errors.append(result["error"])
                     continue
                 found[result["id"]] = result
         self._models = found
+        self._signature = tuple(str(Path(d)) for d in dirs)
         self._last_scan = time.time()
         self._errors = errors
         if self._log:
@@ -312,10 +368,12 @@ class ModelScanner:
         return self.list()
 
     def list(self) -> list[dict[str, Any]]:
+        self._ensure_current()
         return sorted(self._models.values(),
                       key=lambda m: m.get("size_bytes", 0), reverse=True)
 
     def get(self, model_id: str) -> dict[str, Any] | None:
+        self._ensure_current()
         return self._models.get(model_id)
 
     def find_by_alias_or_name(self, name: str) -> dict[str, Any] | None:

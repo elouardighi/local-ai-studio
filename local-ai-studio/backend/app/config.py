@@ -75,6 +75,32 @@ class Settings(BaseModel):
     history_max_samples: int = 900  # bounded in-memory metric history
     log_max_lines: int = 5000
 
+    # --- model library ----------------------------------------------------
+    integrity_check: bool = True   # verify that model files are complete
+    duplicate_scan: bool = True    # group identical files and variants
+    allow_hf_download: bool = False  # OFF: no outbound traffic by default
+    download_dir: str = str(DATA_DIR / "downloads")
+    max_download_bytes: int = 80 * 1024 ** 3
+    verify_download_sha256: bool = True
+    download_free_space_margin_mb: int = 512
+    download_timeout_seconds: int = 60
+    hf_api_base: str = "https://huggingface.co"
+    # Extra hosts to allow besides huggingface.co and its own CDN (anything
+    # under huggingface.co or hf.co is always allowed).
+    hf_allowed_hosts: list[str] = Field(default_factory=lambda: [
+        "huggingface.co",
+        "cdn-lfs.hf.co",
+        "cdn-lfs-us-1.hf.co",
+        "cdn-lfs-eu-1.hf.co",
+    ])
+
+    # --- OpenCode ---------------------------------------------------------
+    # OpenCode reads its model list from its own config file, so a model
+    # that is downloaded later has to be added there to be usable.
+    auto_sync_opencode: bool = True
+    opencode_config_path: str = ""   # empty = look in the usual places
+    opencode_provider: str = "localai"
+
     @field_validator("api_host")
     @classmethod
     def _validate_host(cls, v: str) -> str:
@@ -131,6 +157,46 @@ class Settings(BaseModel):
         if not v:
             raise ValueError("at least one model directory is required")
         return v
+
+    @field_validator("download_dir")
+    @classmethod
+    def _validate_download_dir(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("download_dir must not be empty")
+        return v.strip()
+
+    @field_validator("max_download_bytes")
+    @classmethod
+    def _validate_max_download(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("max_download_bytes must be positive")
+        return v
+
+    @field_validator("hf_api_base")
+    @classmethod
+    def _validate_hf_base(cls, v: str) -> str:
+        v = (v or "").strip().rstrip("/")
+        if not v.startswith("https://") and not v.startswith("http://"):
+            raise ValueError("hf_api_base must be an http(s):// URL")
+        if "/" in v.split("://", 1)[1]:
+            raise ValueError("hf_api_base must not contain a path")
+        host = v.split("://", 1)[1].split(":")[0].lower()
+        if v.startswith("http://") and host not in ("127.0.0.1", "localhost",
+                                                   "::1"):
+            # Plain http is only acceptable for a local test server.
+            raise ValueError("hf_api_base must use https unless it points at "
+                             "localhost")
+        return v
+
+    @field_validator("hf_allowed_hosts")
+    @classmethod
+    def _validate_hf_hosts(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("at least one allowed download host is required")
+        for host in v:
+            if not host or "/" in host or " " in host:
+                raise ValueError(f"'{host}' is not a plain host name")
+        return [h.lower() for h in v]
 
     # -- helpers -----------------------------------------------------------
 

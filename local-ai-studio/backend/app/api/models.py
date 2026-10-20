@@ -96,8 +96,17 @@ async def estimate_load(request: Request, config: LoadConfig) -> Any:
     model = ctx.scanner.get(config.model_id) or ctx.scanner.find_by_alias_or_name(
         config.model_id)
     if model is None:
-        return JSONResponse(status_code=404,
-                            content={"error": {"message": "model not found"}})
+        # The model may simply not have been scanned yet - a folder was
+        # imported, or a download had just finished. Try once more after a
+        # fresh scan before giving up.
+        ctx.scanner.scan()
+        model = ctx.scanner.get(config.model_id) or ctx.scanner.find_by_alias_or_name(
+            config.model_id)
+    if model is None:
+        return JSONResponse(status_code=404, content={"error": {
+            "message": "model not found. It is not in any scanned folder - "
+                       "press Rescan, or import the folder it lives in.",
+            "type": "not_found"}})
     s = ctx.settings_store.settings
     ctx_len = config.context or s.default_ctx
     if config.gpu_mode == "cpu":
@@ -111,10 +120,16 @@ async def estimate_load(request: Request, config: LoadConfig) -> Any:
                     .get("dedicated_free_mb") or 12000.0)
         ngl = recommend_ngl(model, gpu_free, ctx_len,
                             kv_on_gpu=config.kv_on_gpu)["ngl"]
+    gpu_free = None
+    sample = ctx.monitor.last_sample() or {}
+    free = ((sample.get("gpu") or {}).get("dedicated_free_mb"))
+    if free:
+        gpu_free = float(free)
     return {
         "plan": estimate(model, ctx_len, ngl, batch=config.batch or s.default_batch,
                          kv_on_gpu=config.kv_on_gpu,
-                         mmproj=bool(model.get("mmproj_path")) and config.use_mmproj),
+                         mmproj=bool(model.get("mmproj_path")) and config.use_mmproj,
+                         gpu_free_mb=gpu_free),
         "gpu_layers": ngl,
         "context": ctx_len,
     }

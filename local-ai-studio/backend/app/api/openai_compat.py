@@ -44,6 +44,42 @@ def _engine_base(instance: Instance) -> str:
     return f"http://127.0.0.1:{instance.port}"
 
 
+def _explain_context_error(payload: Any, instance: Instance) -> Any:
+    """Make an "exceeds the context size" error honest.
+
+    The engine says "try increasing it". For a model with a small trained
+    window - TinyLlama, for one - that advice cannot be followed: the
+    context cannot be raised. The gateway knows the model's real ceiling,
+    so it says what is actually true and what to do about it.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return payload
+    kind = str(error.get("type") or "")
+    message = str(error.get("message") or "")
+    if "exceeds the available context size" not in message \
+            and kind != "exceed_context_size_error":
+        return payload
+    maximum = getattr(instance, "context_max", None)
+    error["model_max_context"] = maximum
+    error["instance_context"] = getattr(instance, "context", None)
+    if maximum and getattr(instance, "context", 0) >= maximum:
+        error["hint"] = (
+            f"this model was trained with a {maximum:,} token window, so the "
+            f"context cannot be raised. A request of "
+            f"{error.get('n_prompt_tokens', '?')} tokens cannot be served by "
+            f"it at all - and a long conversation cannot even be summarised "
+            f"by it. Use a model with a larger context for agent work.")
+    else:
+        error["hint"] = (
+            f"this instance runs with a {getattr(instance, 'context', '?')} "
+            f"token context. Load it with a larger context, or use a model "
+            f"with a bigger trained window.")
+    return payload
+
+
 async def _resolve(request: Request, model_name: str | None
                    ) -> tuple[Instance | None, JSONResponse | None]:
     """Resolve a model name to a ready instance or an honest error.
@@ -136,11 +172,18 @@ async def v1_health(request: Request) -> Any:
 
 @router.get("/v1/models")
 async def list_models(request: Request) -> Any:
-    """Reflect real registered models (discovered + loaded state)."""
+    """Reflect real registered models (discovered + loaded state).
+
+    The ``metadata`` block carries what a client needs to talk to the model
+    properly: the real context length the model can use on this machine
+    (which is what fits in the free VRAM, not what the model advertises),
+    the output budget, and the load state.
+    """
     ctx = _ctx(request)
     data = []
-    for model in ctx.scanner.list():
+    for model in ctx.library.all_models():
         inst = ctx.instances.find_running_for_model(model["id"])
+        recommended = model.get("recommended") or {}
         entry = {
             "id": model["name"],
             "object": "model",
@@ -153,10 +196,19 @@ async def list_models(request: Request) -> Any:
                 "architecture": model["architecture"],
                 "quantization": model["quantization"],
                 "size_human": model["size_human"],
+                "display_name": model["name"],
                 "loaded": bool(inst and inst.is_loaded),
                 "state": inst.state if inst else "unloaded",
                 "instance_id": inst.instance_id if inst else None,
                 "compatibility": model["compatibility"]["status"],
+                "recommended": {
+                    "context": recommended.get("context"),
+                    "output": recommended.get("output"),
+                    "max_context": recommended.get("max_context")
+                    or model.get("context_length"),
+                    "reason": recommended.get("reason"),
+                    "warning": recommended.get("warning"),
+                },
             },
         }
         data.append(entry)
@@ -226,9 +278,15 @@ def _finalize_json(request: Request, resp: httpx.Response,
                    instance: Instance, request_id: str) -> Any:
     ctx = _ctx(request)
     if resp.status_code >= 400:
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {"error": {"message": resp.text[:500]}}
+        payload = _explain_context_error(payload, instance)
         ctx.tracker.finish(request_id, resp.status_code,
-                           error=resp.text[:500])
-        return JSONResponse(status_code=resp.status_code, content=resp.json())
+                           error=str((payload.get("error") or {})
+                                     .get("message", ""))[:500])
+        return JSONResponse(status_code=resp.status_code, content=payload)
     payload = resp.json()
     usage = payload.get("usage") or {}
     ctx.tracker.finish(request_id, 200,
@@ -255,9 +313,17 @@ async def _stream_upstream(request: Request, url: str, body: dict[str, Any],
             async with client.stream("POST", url, json=body) as upstream:
                 if upstream.status_code >= 400:
                     raw = await upstream.aread()
+                    try:
+                        payload = json.loads(raw)
+                    except ValueError:
+                        payload = {"error": {"message": raw.decode(
+                            errors="replace")[:500]}}
+                    payload = _explain_context_error(payload, instance)
                     ctx.tracker.finish(request_id, upstream.status_code,
-                                       error=raw.decode(errors="replace")[:500])
-                    yield (b"event: error\ndata: " + raw + b"\n\n")
+                                       error=str((payload.get("error") or {})
+                                                 .get("message", ""))[:500])
+                    yield (b"event: error\ndata: "
+                           + json.dumps(payload).encode() + b"\n\n")
                     return
                 async for line in upstream.aiter_lines():
                     if not line.startswith("data:"):

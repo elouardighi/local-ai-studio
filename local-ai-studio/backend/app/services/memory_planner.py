@@ -112,12 +112,17 @@ def estimate_kv_cache_bytes(model: dict[str, Any], ctx: int) -> dict[str, Any]:
 def estimate(model: dict[str, Any], ctx: int, ngl: int,
              batch: int = 512, kv_on_gpu: bool = True,
              mmproj: bool = False,
-             system: dict[str, Any] | None = None) -> dict[str, Any]:
+             system: dict[str, Any] | None = None,
+             gpu_free_mb: float | None = None) -> dict[str, Any]:
     """Produce a full memory plan for loading ``model`` with ``ctx``/``ngl``.
 
     ``system`` overrides the live memory snapshot (tests pass a fixed one so
     verdicts don't depend on whatever else the machine is doing); production
     callers omit it and get measured values from :func:`get_system_memory`.
+
+    ``gpu_free_mb`` is the VRAM that is actually free. Without it the plan
+    reports what the GPU would need but cannot say whether it fits - and a
+    context that does not fit is the most common way a load fails.
     """
     weights = int(model.get("size_bytes") or 0)
     if mmproj and model.get("mmproj_path"):
@@ -167,6 +172,13 @@ def estimate(model: dict[str, Any], ctx: int, ngl: int,
             f"available RAM ({ram_available_mb / 1024:.1f} GB). Windows will "
             f"page to disk; inference may become extremely slow or fail."
         )
+    if gpu_free_mb is not None and gpu_total > float(gpu_free_mb):
+        verdict = "risk_of_paging"
+        warnings.append(
+            f"The plan needs about {gpu_total:,.0f} MB of VRAM but only "
+            f"{float(gpu_free_mb):,.0f} MB is free. The KV cache grows with "
+            f"the context, so a smaller context is the way to make this fit."
+        )
     if ngl == 0 and weights > 0:
         warnings.append("CPU-only configuration selected.")
 
@@ -181,6 +193,7 @@ def estimate(model: dict[str, Any], ctx: int, ngl: int,
         "driver_overhead_mb": DRIVER_OVERHEAD_MB,
         "estimated_gpu_mb": round(gpu_total, 1),
         "estimated_ram_mb": round(ram_total, 1),
+        "gpu_free_mb": gpu_free_mb,
         "gpu_layers": ngl,
         "total_layers": blocks,
         "context": ctx,
@@ -214,3 +227,71 @@ def recommend_ngl(model: dict[str, Any], gpu_free_mb: float,
     reason = (f"free VRAM {gpu_free_mb:.0f} MB - driver/KV/compute reserve; "
               f"~{per_layer_mb:.0f} MB per layer")
     return {"ngl": fit, "reason": reason, "total_layers": blocks}
+
+
+def recommend_context(model: dict[str, Any], gpu_free_mb: float,
+                       ngl: int | None = None,
+                       mmproj: bool = False) -> dict[str, Any]:
+    """The context length that actually fits in the free VRAM.
+
+    A model advertises a context length - 32k, 128k, 150k - that says
+    something about the *architecture*, not about the card it is going on.
+    The KV cache grows with the context and has to live somewhere, so the
+    real number is whatever the free VRAM can hold.
+
+    This is the number a client should be told, otherwise it builds a
+    prompt the engine will only reject.
+    """
+    weights = int(model.get("size_bytes") or 0)
+    if mmproj and model.get("mmproj_path"):
+        import os
+        try:
+            weights += os.path.getsize(model["mmproj_path"])
+        except OSError:
+            pass
+    blocks = int(model.get("block_count") or 0)
+    max_ctx = int(model.get("context_length") or 0)
+    if not weights or not blocks:
+        return {"context": max_ctx or 4096, "confidence": "low",
+                "reason": "model geometry unknown; using the advertised "
+                          "context"}
+
+    # Everything the model needs besides the KV cache.
+    ngl = blocks if ngl is None else max(0, min(int(ngl), blocks))
+    layer_fraction = ngl / blocks
+    gpu_weights_mb = weights * layer_fraction / MB
+    hidden = int(model.get("embedding_length") or 0)
+    compute_mb = (COMPUTE_BUFFER_FIXED_MB
+                  + COMPUTE_BUFFER_FRACTION * gpu_weights_mb
+                  + 512 * hidden * 4 / MB)
+    fixed_mb = gpu_weights_mb + compute_mb + DRIVER_OVERHEAD_MB
+
+    # The KV cache is linear in the context, so one sample gives the
+    # per-token cost.
+    sample = 4096
+    kv = estimate_kv_cache_bytes(model, sample)
+    per_token = kv["bytes"] / sample if sample else 0
+    if per_token <= 0:
+        return {"context": max_ctx or 4096, "confidence": "low",
+                "reason": "KV cache size unknown; using the advertised "
+                          "context"}
+
+    available_mb = gpu_free_mb - fixed_mb
+    if available_mb <= 0:
+        return {"context": 2048, "confidence": "low",
+                "reason": f"the weights alone need about {fixed_mb:,.0f} MB "
+                          f"but only {gpu_free_mb:,.0f} MB of VRAM is free"}
+
+    ctx = int(available_mb * MB / per_token)
+    ctx = max(2048, ctx)
+    ctx -= ctx % 1024                       # round down to a tidy number
+    if max_ctx:
+        ctx = min(ctx, max_ctx)
+    return {
+        "context": ctx,
+        "confidence": kv.get("confidence", "low"),
+        "reason": (f"about {fixed_mb:,.0f} MB for the weights and buffers, "
+                   f"leaving {available_mb:,.0f} MB of VRAM for the KV cache"
+                   + (f"; the model was trained for {max_ctx:,} tokens"
+                      if max_ctx and ctx < max_ctx else "")),
+    }

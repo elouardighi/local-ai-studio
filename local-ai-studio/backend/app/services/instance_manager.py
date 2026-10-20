@@ -67,6 +67,21 @@ class IllegalTransition(RuntimeError):
     pass
 
 
+def clamp_context(requested: int, model: dict[str, Any]) -> int:
+    """Never ask for more context than the model can actually use.
+
+    llama.cpp clamps the context to the model's trained maximum, but it
+    allocates the KV cache for the size it was *asked* for. Asking a 2048
+    token model for 100 000 therefore burns gigabytes of VRAM on a cache
+    that can never be used - and the instance record ends up claiming a
+    context the engine does not have.
+    """
+    maximum = int(model.get("context_length") or 0)
+    if maximum and requested > maximum:
+        return maximum
+    return max(512, requested)
+
+
 @dataclass
 class Instance:
     instance_id: str
@@ -82,6 +97,7 @@ class Instance:
     gpu_layers: int = 0
     total_layers: int | None = None
     context: int = 8192
+    context_max: int | None = None   # the model's own ceiling
     batch: int = 512
     ubatch: int = 512
     flash_attention: str = "auto"
@@ -267,7 +283,15 @@ class InstanceManager:
             # Allow loading by path or name for convenience.
             model = self._scanner.find_by_alias_or_name(model_id)
         if model is None:
-            raise ValueError(f"model not found: {model_id!r}. Run a rescan.")
+            # It may not have been scanned yet - a folder was imported, or
+            # a download had just finished. Try once more after a rescan.
+            self._scanner.scan()
+            model = self._scanner.get(model_id) or \
+                self._scanner.find_by_alias_or_name(model_id)
+        if model is None:
+            raise ValueError(
+                f"model not found: {model_id!r}. It is not in any scanned "
+                f"folder - press Rescan, or import the folder it lives in.")
         if model["compatibility"]["status"] == "error":
             raise ValueError(
                 f"model cannot be loaded: {model['compatibility']['reason']}")
@@ -304,7 +328,9 @@ class InstanceManager:
             model_path=model["path"],
             backend=getattr(settings, "engine_backend", "vulkan"),
             mmproj_path=model.get("mmproj_path"),
-            context=int(config.get("context", settings.default_ctx)),
+            context=clamp_context(
+                int(config.get("context", settings.default_ctx)), model),
+            context_max=int(model.get("context_length") or 0) or None,
             batch=int(config.get("batch", settings.default_batch)),
             ubatch=int(config.get("ubatch", settings.default_ubatch)),
             flash_attention=str(config.get("flash_attention",
@@ -342,12 +368,57 @@ class InstanceManager:
             # 2. estimating memory
             inst.transition("estimating_memory")
             self._publish(inst)
+            if inst.context_max and inst.context >= inst.context_max:
+                self._log.info(
+                    "instances",
+                    f"{inst.model_name}: context capped at "
+                    f"{inst.context_max:,} tokens (the model's maximum)")
+            gpu_free = self._gpu_free_mb()
+
+            # The context is settled before the layer count. The KV cache
+            # grows with the context, so a context that is too large would
+            # otherwise leave no room for the weights and collapse the
+            # offload to nothing.
+            if gpu_free and gpu_free > 0:
+                target = int(memory_planner.recommend_context(
+                    model, gpu_free,
+                    mmproj=bool(inst.mmproj_path)).get("context") or 0)
+                if 2048 <= target < inst.context:
+                    self._log.info(
+                        "instances",
+                        f"{inst.model_name}: context reduced from "
+                        f"{inst.context:,} to {target:,} tokens to fit in "
+                        f"{gpu_free:,.0f} MB of VRAM")
+                    inst.context = target
+
             ngl = self._decide_ngl(inst, model, config, settings)
             inst.gpu_layers = ngl
             inst.total_layers = model.get("block_count")
             estimate = memory_planner.estimate(
                 model, inst.context, ngl, batch=inst.batch,
-                kv_on_gpu=inst.kv_on_gpu, mmproj=bool(inst.mmproj_path))
+                kv_on_gpu=inst.kv_on_gpu, mmproj=bool(inst.mmproj_path),
+                gpu_free_mb=gpu_free or None)
+            if estimate["verdict"] == "risk_of_paging" and gpu_free:
+                # The KV cache grows with the context, so a context that
+                # does not fit is the usual reason. Try the largest one that
+                # does rather than refusing the whole load.
+                smaller = int(memory_planner.recommend_context(
+                    model, gpu_free, ngl=ngl,
+                    mmproj=bool(inst.mmproj_path)).get("context") or 0)
+                if 2048 <= smaller < inst.context:
+                    retry = memory_planner.estimate(
+                        model, smaller, ngl, batch=inst.batch,
+                        kv_on_gpu=inst.kv_on_gpu,
+                        mmproj=bool(inst.mmproj_path),
+                        gpu_free_mb=gpu_free)
+                    if retry["verdict"] != "risk_of_paging":
+                        self._log.info(
+                            "instances",
+                            f"{inst.model_name}: context reduced from "
+                            f"{inst.context:,} to {smaller:,} tokens to fit "
+                            f"in {gpu_free:,.0f} MB of VRAM")
+                        inst.context = smaller
+                        estimate = retry
             inst.estimate = estimate
             if estimate["verdict"] == "risk_of_paging" and not config.get(
                     "force"):
@@ -428,6 +499,19 @@ class InstanceManager:
         inst.pid = None
         self._publish(inst)
         self._persist()
+
+    def _gpu_free_mb(self) -> float:
+        """Free VRAM right now, or 0 when it is not known."""
+        monitor = getattr(self, "monitor", None)
+        if monitor is None:
+            return 0.0
+        try:
+            sample = monitor.sample()
+        except Exception:  # noqa: BLE001 - fall back to the cached sample
+            sample = monitor.last_sample()
+        gpu = (sample or {}).get("gpu") or {}
+        free = gpu.get("dedicated_free_mb")
+        return float(free) if free is not None else 0.0
 
     def _decide_ngl(self, inst: Instance, model: dict[str, Any],
                     config: dict[str, Any], settings: Any) -> int:

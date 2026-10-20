@@ -407,6 +407,50 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2px); }
 
 .mono { font-family: var(--mono); }
 
+/* ---------- model library ---------- */
+
+.filter-bar { padding: 12px 14px; margin-bottom: 12px; }
+.filter-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.filter-row + .filter-row { margin-top: 8px; }
+.filter-row .grow { flex: 1 1 260px; min-width: 200px; }
+.filter-row label.inline {
+  display: flex; flex-direction: row; flex-wrap: nowrap;
+  flex: 0 0 auto; gap: 6px; align-items: center;
+  color: var(--text-faint); font-size: 12px; margin: 0;
+}
+.filter-row label.inline .tiny { flex: 0 0 96px; width: 96px; }
+
+.warn-text { color: var(--yellow); }
+.err-text { color: var(--red); }
+.hint.danger, .estimate.danger { color: var(--red); }
+.estimate.danger { border-color: var(--red); }
+
+.list.small { gap: 6px; }
+.row-card.small { padding: 8px 10px; }
+.row-card.small .row-title { font-size: 13px; }
+
+.opencode-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 8px 12px; margin-bottom: 12px; flex-wrap: wrap;
+}
+.opencode-info { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.opencode-info .hint { margin: 0; }
+
+.browser {
+  max-height: 220px; overflow-y: auto;
+  border: 1px solid var(--border-soft); border-radius: 8px;
+  padding: 6px; display: flex; flex-direction: column; gap: 2px;
+  background: var(--bg);
+}
+.browser-item {
+  appearance: none; background: transparent; border: 0;
+  color: var(--text-dim); text-align: left; padding: 4px 8px;
+  border-radius: 6px; cursor: pointer; font-size: 12.5px;
+  font-family: inherit;
+}
+.browser-item:hover { background: var(--bg-card); color: var(--text); }
+.browser .btn { align-self: flex-start; margin-top: 4px; }
+
 @media (max-width: 860px) {
   .app { flex-direction: column; }
   .sidebar { width: 100%; height: auto; position: static; }

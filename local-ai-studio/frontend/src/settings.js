@@ -47,6 +47,29 @@ const SCHEMA = [
     { key: "history_max_samples", label: "Max metric samples kept in memory", type: "number" },
     { key: "log_max_lines", label: "Max log lines kept", type: "number" },
   ]},
+  { section: "Model library", fields: [
+    { key: "integrity_check", label: "Check that model files are complete", type: "checkbox",
+      warn: "Reads each file's tensor directory to find out whether the download finished. Adds a second or two per model to a scan." },
+    { key: "duplicate_scan", label: "Look for duplicate and variant models", type: "checkbox",
+      warn: "Fingerprints every file so identical copies and other quantizations of the same model can be pointed out." },
+  ]},
+  { section: "Downloads from Hugging Face", fields: [
+    { key: "allow_hf_download", label: "Allow downloads from Hugging Face", type: "checkbox",
+      warn: "Off by default. Even when on, every file is planned and shown to you first, and nothing is fetched until you approve that specific download." },
+    { key: "download_dir", label: "Download folder", type: "text" },
+    { key: "max_download_bytes", label: "Largest download allowed (GB)", type: "number", unit: "gb" },
+    { key: "verify_download_sha256", label: "Verify every download against the published hash", type: "checkbox",
+      warn: "Strongly recommended. A file that does not match its hash is discarded instead of being installed." },
+    { key: "download_free_space_margin_mb", label: "Free space to keep in reserve (MB)", type: "number" },
+    { key: "hf_api_base", label: "Hugging Face address", type: "text" },
+  ]},
+  { section: "OpenCode", fields: [
+    { key: "auto_sync_opencode", label: "Keep the OpenCode model list in step", type: "checkbox",
+      warn: "OpenCode reads its model list from its own config file. With this on, a model that is downloaded is added to that file, and a model that is deleted here is removed from it." },
+    { key: "opencode_config_path", label: "OpenCode config file", type: "text",
+      warn: "Leave empty to look in the usual places." },
+    { key: "opencode_provider", label: "The provider to update", type: "text" },
+  ]},
 ];
 
 let settings = {};
@@ -115,7 +138,10 @@ function fieldNode(field, needsRestart) {
   } else {
     control = el("input", { type: field.type === "number" ? "number" : "text", id,
       "data-key": field.key, "data-type": field.type });
-    control.value = value ?? "";
+    // Some byte counts are easier to read in gigabytes.
+    control.value = field.unit === "gb" && value != null
+      ? Math.round((value / 1073741824) * 10) / 10
+      : (value ?? "");
   }
 
   return el("label", { class: field.type === "list" ? "full" : "" }, [
@@ -128,12 +154,22 @@ function fieldNode(field, needsRestart) {
 
 async function save() {
   const payload = {};
+  const schemaByKey = {};
+  for (const group of SCHEMA) {
+    for (const field of group.fields) schemaByKey[field.key] = field;
+  }
   document.querySelectorAll("[data-key]").forEach((node) => {
     const key = node.dataset.key;
     const type = node.dataset.type;
+    const field = schemaByKey[key] || {};
     if (type === "checkbox") payload[key] = node.checked;
     else if (type === "list") payload[key] = node.value.split("\n").map((s) => s.trim()).filter(Boolean);
-    else if (type === "number") payload[key] = Number(node.value);
+    else if (type === "number") {
+      let value = Number(node.value);
+      // Byte counts shown in gigabytes are stored in bytes.
+      if (field.unit === "gb") value = Math.round(value * 1073741824);
+      payload[key] = value;
+    }
     else if (type === "password") { if (node.value) payload[key] = node.value; }
     else payload[key] = node.value;
   });

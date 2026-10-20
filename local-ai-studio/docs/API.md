@@ -49,6 +49,33 @@ curl http://127.0.0.1:1234/v1/models
 The `id` is what you put in the `model` field of a request. The internal
 `metadata.model_id` (a short hash) also works.
 
+The `metadata.recommended` block says what the model can really do on this
+machine right now:
+
+```json
+"recommended": {
+  "context": 18432,
+  "output": 4608,
+  "reason": "about 12,191 MB for the weights and buffers, leaving 3,019 MB of VRAM for the KV cache; the model was trained for 262,144 tokens"
+}
+```
+
+`context` is the largest context that fits in the free VRAM with the model
+fully offloaded — **not** the number the model advertises. A client that
+believes it has 150k tokens will build a prompt the engine rejects, so this
+is the number to put in a client's `limit.context`.
+
+`max_context` is the model's own ceiling - the window it was trained with.
+`context` never exceeds it. When the two are close, the model is as large
+as it can be; when they are far apart, the VRAM is the limit.
+
+`warning` is present when the context is too small to hold a long
+conversation, which matters for anything that summarises its own history:
+
+> only 2,048 tokens fit here. A long conversation will not work:
+> summarising it needs more room than the model has. Use a model with a
+> larger context for agent work.
+
 ### `POST /v1/chat/completions`
 
 Standard OpenAI chat shape. Extra fields are forwarded to the engine untouched,
@@ -226,7 +253,6 @@ request gauges.
 ### Models
 
 #### `GET /api/models`
-
 Discovery results with richer metadata than `/v1/models`: file path, GGUF
 architecture, quantization, byte size, context length, per-layer memory
 estimates, and a `compatibility` verdict.
@@ -409,6 +435,299 @@ resource sample), then a live stream of typed events:
 #### `GET /api/events` (SSE)
 
 The same stream over Server-Sent Events for clients that can't do WebSocket.
+
+---
+
+## Library API (`/api/library`)
+
+The library API is the richer view of the model collection: it searches,
+reports file integrity, spots duplicates and runs the checks that must pass
+before a model is loaded.
+
+### `GET /api/library/models`
+
+Search the library. Every filter is optional and they combine with AND.
+
+| Parameter | Meaning |
+|---|---|
+| `q` | Free text over name, path, architecture, quantization and parameter label |
+| `architecture` | Exact architecture (`qwen35moe`, `gemma4`, …) or `all` |
+| `quantization` | Exact quantization (`IQ2_M`, `Q4_K_M`, …) or `all` |
+| `format` | `GGUF` or `safetensors`, or `all` |
+| `min_size` / `max_size` | Size bounds: `10gb`, `500 MB`, `1.5g` or a byte count |
+| `integrity` | `ok`, `unverified`, `incomplete` or `corrupt` |
+| `compatibility` | `supported`, `unverified`, `convertible` or `error` |
+| `duplicates_only` | Only models that exist more than once |
+| `sort` | `size`, `name`, `architecture` or `quantization` |
+| `order` | `asc` or `desc` |
+
+```powershell
+(Invoke-RestMethod "http://127.0.0.1:1234/api/library/models?architecture=qwen35&max_size=10gb&sort=name").models |
+  Select-Object name, quantization, size_human, @{n='state';e={$_.integrity.status}}
+```
+
+The response also carries `facets` — the architectures, quantizations, formats
+and file states that exist — so a UI can fill its filter controls from the
+data instead of hard-coding them.
+
+Each model record gained three fields:
+
+- `integrity` — `status` (`ok`, `unverified`, `incomplete`, `corrupt`), a
+  `reason` when something is wrong, and the `expected_bytes` the file should
+  have. A file is `incomplete` when its tensor data is shorter than the
+  tensor directory says it should be, which is what an interrupted download
+  looks like.
+- `duplicate_count` / `duplicates` — other models with the same content.
+  Duplicates are found by fingerprinting each file (size plus its first and
+  last mebibyte), so the same weights in two folders are recognised without
+  reading ten gigabytes twice.
+- `variant_count` / `variants` - other quantizations of the same base model.
+  These are *not* duplicates and should not be deleted.
+
+**A model that is not found is looked for again.** The scan results follow
+the folder list, and a lookup that comes up empty triggers one more scan
+before it gives up - so a model that was just downloaded, or that appeared
+in a folder imported a moment ago, is found rather than reported as
+missing. When it really is gone, the error says so:
+
+```
+model not found: 4f4103c593a8ad67. It is not in any scanned folder any more
+- press Rescan, or import the folder it lives in.
+```
+
+### `GET /api/library/folders` · `POST` · `DELETE`
+
+The folders the library scans. `POST` imports one:
+
+```json
+{"path": "C:\\Users\\SAKISAKI\\models"}
+```
+
+The folder is added to `model_dirs` and the library is rescanned. Nothing
+inside the folder is moved, renamed or deleted. `DELETE` stops scanning a
+folder; the folder and its files are left alone.
+
+### `GET /api/library/browse?path=`
+
+Lists the sub-folders of a path so the dashboard can offer a folder picker.
+System directories (Windows, Program Files) are hidden, and a path that
+cannot be read is reported rather than guessed at.
+
+### `POST /api/library/preflight`
+
+Runs the checks that must pass before a model is loaded.
+
+```json
+{"model_id": "e07e0b1d5ae79a8a", "context": 8192, "gpu_layers": 99, "gpu_mode": "auto"}
+```
+
+```json
+{
+  "verdict": "risky",
+  "checks": [
+    {"name": "file", "status": "ok", "detail": "11,659,235,456 bytes on disk"},
+    {"name": "integrity", "status": "ok", "detail": "the file is complete"},
+    {"name": "architecture", "status": "ok", "detail": "'qwen35moe' is implemented by llama.cpp 0.7.0-dev (b11712)"},
+    {"name": "quantization", "status": "warn", "detail": "very aggressive - large quality loss"},
+    {"name": "vision projector", "status": "ok", "detail": "attached: mmproj-...-f16.gguf"},
+    {"name": "context", "status": "ok", "detail": "8,192 of 262,144 tokens (the model maximum)"},
+    {"name": "memory", "status": "ok", "detail": "about 14,372 MB of VRAM and 0.5 GB of RAM"}
+  ]
+}
+```
+
+`verdict` is `ready`, `risky` or `blocked`. A `blocked` verdict means one of
+the checks failed — the file is incomplete, the architecture is not
+implemented, or the requested context does not fit.
+
+### `POST /api/library/rescan`
+
+Rescans every folder and rebuilds the duplicate and variant groups.
+
+### `GET /api/library/models/{model_id}/delete-plan`
+
+What deleting a model would remove. Nothing is deleted here — this is what
+the confirmation dialog shows.
+
+```json
+{
+  "model_id": "e65c6f1bee67563c",
+  "model_name": "py007_tinyllama-1.1b-chat-v0.3",
+  "files": [
+    {"path": "...\\tinyllama-1.1b-chat-v0.3.Q2_K.gguf", "size_bytes": 482149856}
+  ],
+  "total_bytes": 482149856,
+  "projector": null,
+  "loaded": false,
+  "recoverable": true,
+  "recoverable_reason": null
+}
+```
+
+`recoverable` is false when the file is too big for the Recycle Bin on
+that drive — Windows erases such files permanently, whatever the caller
+asks for, so the user is told *before* deleting rather than after.
+
+### `DELETE /api/library/models/{model_id}`
+
+Deletes a model from disk.
+
+| Parameter | Meaning |
+|---|---|
+| `confirm` | Must be true. Nothing happens without it. |
+| `delete_mmproj` | Also delete the vision projector. Off by default — a projector is never removed by accident. |
+| `permanent` | Erase the file instead of using the Recycle Bin. |
+
+The confirmation may be sent in the body or as `?confirm=true`, because
+some HTTP stacks drop the body of a DELETE.
+
+```powershell
+Invoke-RestMethod -Method Delete -Uri "http://127.0.0.1:1234/api/library/models/e65c6f1bee67563c?confirm=true"
+```
+
+```json
+{
+  "deleted": true,
+  "model_name": "py007_tinyllama-1.1b-chat-v0.3",
+  "files": [{"path": "...", "size_bytes": 482149856,
+             "method": "moved to the Recycle Bin", "recoverable": true}],
+  "freed_bytes": 482149856,
+  "permanent": false
+}
+```
+
+The rules that keep this safe:
+
+- **The path comes from the library's own record.** A caller cannot ask for
+  an arbitrary file to be removed.
+- **A loaded model cannot be deleted.** Unload it first (409 `busy`).
+- **Nothing happens without a confirmation** (400 `confirmation_required`).
+- **The file goes to the Windows Recycle Bin** by default, so it can be put
+  back. A permanent delete has to be asked for.
+- **The vision projector is a separate choice** and is kept unless
+  `delete_mmproj` is set.
+- **Only files are removed**, never a directory.
+
+### `GET /api/library/opencode`
+
+What the OpenCode config looks like, and whether it is in step with the
+library.
+
+```json
+{
+  "enabled": true,
+  "path": "C:\\Users\\SAKISAKI\\.config\\opencode\\opencode.jsonc",
+  "exists": true,
+  "provider": "localai",
+  "models": ["Bonsai-27B", "Abl 27b", "..."],
+  "count": 7,
+  "library_models": ["Bonsai-27B", "Abl 27b", "..."],
+  "missing": []
+}
+```
+
+`missing` lists the models the library knows about that the config does
+not yet offer.
+
+### `POST /api/library/opencode/sync`
+
+Puts the two back together. Missing models are added, and models this
+library deleted are taken out. Models the user listed themselves are never
+touched.
+
+```json
+{"synced": true, "added": ["New-Model"], "skipped": ["Bonsai-27B"], "removed": []}
+```
+
+This is what runs automatically when a model is downloaded or deleted, so
+it is only needed when the config was changed by hand.
+
+The limits written are the ones the server computed: the context that fits
+in the free VRAM, and an output budget of a quarter of that.
+
+---
+
+## Downloads from Hugging Face (optional)
+
+**Browsing is always available.** Searching the Hub and listing a
+repository's files are read-only metadata requests, and they work whether or
+not downloading is switched on - looking at what is out there should not
+require opting in to fetch gigabytes.
+
+**Downloading is off by default.** Nothing in this project fetches a file
+from the internet until `allow_hf_download` is switched on in Settings, and
+even then every file is planned and shown to you before a single byte is
+transferred.
+
+| Endpoint | Purpose | Needs downloads on? |
+|---|---|---|
+| `GET /api/library/hf/search?q=&filter=` | Find repositories by name | no |
+| `GET /api/library/hf/files?repo=` | List a repository's files with size and hash | no |
+| `POST /api/library/downloads/plan` | Work out what a download would do | no |
+| `POST /api/library/downloads` | Start a planned download — needs `approve: true` | yes |
+| `GET /api/library/downloads` | The download log | no |
+| `POST /api/library/downloads/{id}/cancel` | Stop a download | - |
+
+`filter` is passed straight to the Hub. It defaults to `gguf`, which keeps
+the results to repositories that actually ship GGUF files - the only format
+that can be loaded here. Pass `filter=` to see everything.
+
+### Planning
+
+```json
+{"repo_id": "ggml-org/models", "filename": "tinyllamas/stories260K.gguf"}
+```
+
+```json
+{
+  "plan": {
+    "plan_id": "85bdba4693c8",
+    "size_bytes": 1185376,
+    "size_human": "1.1 MB",
+    "destination": "...\\data\\downloads\\ggml-org\\models\\tinyllamas\\stories260K.gguf",
+    "hash_algorithm": "sha256",
+    "hash": "270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d",
+    "free_bytes": 82735312896,
+    "required_bytes": 538079995,
+    "resume_bytes": 0,
+    "warnings": []
+  },
+  "downloads_enabled": false
+}
+```
+
+Planning is a read-only metadata request, so it works whether or not
+downloading is switched on - you can always see exactly what a download
+would do before deciding to allow it. The plan is the whole safety story
+in one object: the size, where the file would land, the hash it will be
+checked against, how much room there is, and what has to be true before the
+transfer can start. A download is refused when the file is not a `.gguf`,
+when it is over the size limit, or when the disk does not have room for it
+plus a safety margin.
+
+`downloads_enabled` tells the caller whether the transfer would be allowed
+right now. It is `false` until `allow_hf_download` is switched on.
+
+### Approving
+
+```json
+{"plan_id": "85bdba4693c8", "approve": true}
+```
+
+Without `approve: true` the request is answered with `403 approval_required`
+and nothing is fetched. The plan is also short-lived: it expires after
+fifteen minutes.
+
+### What happens during the transfer
+
+- The file is written as `<name>.part` and the transfer continues from there
+  with an HTTP range request if the download is interrupted.
+- The size must match, and the content must match the hash the Hub
+  published. A file that fails is **deleted**, not installed.
+- Only `huggingface.co` and its own CDN (`hf.co`) are ever contacted; every
+  redirect is checked, and anything else is refused.
+- A downloaded file is **never** loaded or executed. It joins the library
+  like any other model and still has to be loaded explicitly.
 
 ---
 

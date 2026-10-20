@@ -20,7 +20,7 @@
 
       <nav class="nav" id="nav">
         <button class="nav-item active" data-page="dashboard">Dashboard</button>
-        <button class="nav-item" data-page="models">Models</button>
+        <button class="nav-item" data-page="models">Library</button>
         <button class="nav-item" data-page="instances">Instances <span class="badge" id="nav-instances">0</span></button>
         <button class="nav-item" data-page="chat">Chat</button>
         <button class="nav-item" data-page="playground">API Playground</button>
@@ -95,20 +95,59 @@
       <!-- ============ Models ============ -->
       <section class="page" id="page-models">
         <header class="page-head">
-          <h1>Models</h1>
+          <h1>Model library</h1>
           <div class="page-actions">
-            <input type="search" id="model-search" placeholder="Search models&hellip;" class="input">
-            <select id="model-filter" class="input">
-              <option value="all">All models</option>
-              <option value="loaded">Loaded</option>
-              <option value="supported">Supported</option>
-              <option value="unverified">Unverified</option>
-              <option value="convertible">Needs conversion</option>
-            </select>
+            <button class="btn" id="library-import-folder">Import folder</button>
+            <button class="btn" id="library-download">Download</button>
             <button class="btn" id="models-rescan">Rescan</button>
           </div>
         </header>
+
+        <div class="card filter-bar" id="library-filters">
+          <div class="filter-row">
+            <input type="search" id="model-search" placeholder="Search by name, path, architecture or quantization…" class="input grow">
+            <select id="filter-architecture" class="input"><option value="all">All architectures</option></select>
+            <select id="filter-quantization" class="input"><option value="all">All quantizations</option></select>
+            <select id="filter-format" class="input"><option value="all">All formats</option></select>
+            <select id="model-sort" class="input">
+              <option value="size">Sort by size</option>
+              <option value="name">Sort by name</option>
+              <option value="architecture">Sort by architecture</option>
+              <option value="quantization">Sort by quantization</option>
+            </select>
+            <button class="btn" id="model-order" title="Reverse the order">↓</button>
+          </div>
+          <div class="filter-row">
+            <label class="inline">Size
+              <input type="text" id="filter-min-size" class="input tiny" placeholder="min, e.g. 4gb" title="Smallest size to show, e.g. 4gb">
+              <input type="text" id="filter-max-size" class="input tiny" placeholder="max" title="Largest size to show">
+            </label>
+            <select id="filter-integrity" class="input">
+              <option value="all">Any file state</option>
+              <option value="ok">Complete</option>
+              <option value="unverified">Unverified</option>
+              <option value="incomplete">Incomplete</option>
+              <option value="corrupt">Damaged</option>
+            </select>
+            <select id="filter-compatibility" class="input">
+              <option value="all">Any compatibility</option>
+              <option value="supported">Supported</option>
+              <option value="unverified">Unverified</option>
+              <option value="convertible">Needs conversion</option>
+              <option value="error">Broken</option>
+            </select>
+            <label class="checkbox"><input type="checkbox" id="filter-duplicates"> Only duplicates</label>
+          </div>
+        </div>
+
         <p class="hint" id="models-summary"></p>
+        <div class="card opencode-bar" id="opencode-bar">
+          <div class="opencode-info">
+            <strong>OpenCode</strong>
+            <span class="hint" id="opencode-note">checking&hellip;</span>
+          </div>
+          <button class="btn small" id="opencode-sync" type="button">Sync now</button>
+        </div>
         <div id="models-list" class="list"></div>
       </section>
 
@@ -275,7 +314,62 @@
       <div class="hint" id="load-progress"></div>
       <div class="dialog-actions">
         <button class="btn" value="cancel" id="load-cancel">Cancel</button>
-        <button class="btn primary" id="load-start" value="default">Load</button>
+        <button class="btn primary" type="button" id="load-start" value="default">Load</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Folder import dialog -->
+  <dialog id="folder-dialog">
+    <form method="dialog" class="dialog-body">
+      <h2>Import a model folder</h2>
+      <p class="hint">Add a folder to the library. Its models are scanned like any other folder. Nothing inside is moved, renamed or deleted.</p>
+      <div id="folder-list" class="list small"></div>
+      <div class="row">
+        <label style="flex:1">Folder path
+          <input type="text" id="folder-path" class="input" placeholder="C:\Users\SAKISAKI\models">
+        </label>
+        <button class="btn" type="button" id="folder-browse">Browse&hellip;</button>
+      </div>
+      <div id="folder-browser" class="browser"></div>
+      <div class="dialog-actions">
+        <button class="btn" value="cancel" id="folder-cancel">Close</button>
+        <button class="btn primary" type="button" id="folder-add">Import folder</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Delete dialog -->
+  <dialog id="delete-dialog">
+    <form method="dialog" class="dialog-body">
+      <h2>Delete model</h2>
+      <div id="delete-plan" class="estimate"></div>
+      <div class="dialog-actions">
+        <button class="btn" value="cancel" id="delete-cancel">Cancel</button>
+        <button class="btn danger" type="button" id="delete-start" disabled>Delete</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Hugging Face download dialog -->
+  <dialog id="download-dialog">
+    <form method="dialog" class="dialog-body">
+      <h2>Download a model</h2>
+      <p class="hint" id="download-note"></p>
+      <div class="row">
+        <label style="flex:1">Search the Hugging Face Hub
+          <input type="search" id="hf-query" class="input" placeholder="Qwen3 30B GGUF">
+        </label>
+        <button class="btn" type="button" id="hf-search">Search</button>
+      </div>
+      <label class="checkbox"><input type="checkbox" id="hf-gguf-only" checked> Only repositories that ship GGUF files</label>
+      <div id="hf-results" class="list"></div>
+      <div id="hf-files" class="list"></div>
+      <div id="download-plan" class="estimate"></div>
+      <div class="dialog-actions">
+        <button class="btn" type="button" id="hf-enable" hidden>Allow downloads</button>
+        <button class="btn" value="cancel" id="download-cancel">Close</button>
+        <button class="btn primary" type="button" id="hf-download" disabled>Download</button>
       </div>
     </form>
   </dialog>

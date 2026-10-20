@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import struct
 import sys
+import os
 from pathlib import Path
 
 import pytest
@@ -15,16 +16,23 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def write_gguf(path: Path, metadata: dict) -> Path:
-    """Write a minimal but structurally valid GGUF v3 file (no tensors)."""
+def write_gguf(path: Path, metadata: dict, tensors: list | None = None,
+               data_bytes: int = 0) -> Path:
+    """Write a minimal but structurally valid GGUF v3 file.
+
+    ``tensors`` is a list of ``(name, dims, type)`` tuples; the file then
+    carries a real tensor directory and ``data_bytes`` of tensor data, which
+    is what makes a truncated file detectable.
+    """
     def pack_string(s: str) -> bytes:
         b = s.encode("utf-8")
         return struct.pack("<Q", len(b)) + b
 
+    tensors = tensors or []
     out = bytearray()
     out += struct.pack("<I", 0x46554747)  # magic
     out += struct.pack("<I", 3)           # version
-    out += struct.pack("<Q", 0)           # tensor count
+    out += struct.pack("<Q", len(tensors))  # tensor count
     out += struct.pack("<Q", len(metadata))
     for key, value in metadata.items():
         out += pack_string(key)
@@ -44,6 +52,20 @@ def write_gguf(path: Path, metadata: dict) -> Path:
                 out += pack_string(item)
         else:
             raise TypeError(f"unsupported test value: {value!r}")
+
+    # Tensor directory: name, n_dims, dims (u64), type, offset.
+    offset = 0
+    for name, dims, ttype in tensors:
+        out += pack_string(name)
+        out += struct.pack("<I", len(dims))
+        for dim in dims:
+            out += struct.pack("<Q", dim)
+        out += struct.pack("<I", ttype)
+        out += struct.pack("<Q", offset)
+        offset += 4 * (dims[0] if dims else 1)   # assume f32 elements
+    # The tensor data starts on a 32-byte boundary, as the format requires.
+    out += b"\0" * ((-len(out)) % 32)
+    out += b"\0" * data_bytes
     path.write_bytes(bytes(out))
     return path
 
@@ -134,6 +156,18 @@ def fake_engine_path(tmp_path: Path) -> Path:
     path = tmp_path / "fake_engine.py"
     path.write_text(FAKE_ENGINE, encoding="utf-8")
     return path
+
+
+def port_range(base: int, span: int = 100) -> tuple[int, int]:
+    """A port range that is unlikely to clash with another test run.
+
+    The engine port is chosen by binding a socket and letting go of it
+    again, so two runs of the suite at the same time can pick the same
+    port. Offsetting the range by the process id makes that unlikely
+    without needing a fixed range.
+    """
+    start = base + (os.getpid() % 500) * 2
+    return start, start + span
 
 
 @pytest.fixture

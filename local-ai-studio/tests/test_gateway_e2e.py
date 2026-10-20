@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.config import Settings, SettingsStore
 from backend.app.main import create_app
-from tests.conftest import write_gguf
+from tests.conftest import port_range, write_gguf
 
 
 def _build_app(tmp_path: Path, fake_engine_path: Path, load_delay: float = 0):
@@ -40,8 +40,8 @@ def _build_app(tmp_path: Path, fake_engine_path: Path, load_delay: float = 0):
     store.replace(Settings(
         model_dirs=[str(model_dir)],
         engine_path=sys.executable,          # fake engine runs on python
-        engine_port_start=19500,
-        engine_port_end=19599,
+        engine_port_start=port_range(19500)[0],
+        engine_port_end=port_range(19500)[1],
         converted_dir=str(tmp_path / "converted"),
         default_ctx=2048,
     ).model_dump())
@@ -96,8 +96,8 @@ def _make_e2e(tmp_path: Path, fake_engine_path: Path,
     store.replace(Settings(
         model_dirs=[str(model_dir)],
         engine_path=sys.executable,          # fake engine runs on python
-        engine_port_start=19500,
-        engine_port_end=19599,
+        engine_port_start=port_range(19500)[0],
+        engine_port_end=port_range(19500)[1],
         converted_dir=str(tmp_path / "converted"),
         default_ctx=2048,
     ).model_dump())
